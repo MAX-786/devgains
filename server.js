@@ -1,24 +1,49 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
+import express from 'express';
+import mongoose from 'mongoose';
+import cors from 'cors';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const app = express();
 app.use(express.json());
-// Allow all origins to prevent CORS issues during development
-app.use(cors({ origin: '*' }));
 
-// REPLACE <db_password> with your actual password
+// Verbose CORS options with logging to help debug frontend CORS issues
+const corsOptions = {
+  origin: (origin, callback) => {
+    // allow requests from any origin
+    callback(null, true);
+  },
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+
+// (request logging removed)
+
+// Handle OPTIONS preflight globally and log details
+// Use a valid path pattern for express/path-to-regexp
+// Handle OPTIONS preflight globally via middleware to avoid path-to-regexp issues
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.header('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || 'Content-Type, x-auth-token');
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 const MONGO_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET;
 
+// --- DB ---
 mongoose.connect(MONGO_URI)
   .then(() => console.log('MongoDB Connected'))
   .catch(err => console.error('MongoDB Connection Error:', err));
 
-// --- DATA CONSTANTS (Source of Truth) ---
-
+// --- DATA CONSTANTS ---
 const MP_BREAKFAST_ITEMS = [
   { name: "Indori Poha + Peanuts", calories: 350, protein: 8, carbs: 60, fats: 12 },
   { name: "Jeeravan Sev (1 tbsp)", calories: 60, protein: 2, carbs: 5, fats: 4 },
@@ -60,25 +85,10 @@ const DEFAULT_DIET_TEMPLATE = [
   { title: "Lunch (Sustained Energy)", time: "13:30", suggestedItems: LUNCH_ITEMS },
   { title: "Pre-Workout / Snack", time: "17:00", suggestedItems: EVENING_SNACK },
   { title: "Dinner (Protein Focus)", time: "20:30", suggestedItems: DINNER_ITEMS },
-  { title: "Bedtime (Recovery)", time: "22:30", suggestedItems: BEDTIME },
-];
-
-const DEFAULT_WORKOUT_A = [
-  { name: "Goblet Squat", targetSets: 3, targetRepsRange: "8-10", notes: "Keep torso upright. Heels planted." },
-  { name: "DB Bench Press", targetSets: 3, targetRepsRange: "8-12", notes: "Full ROM. Don't flair elbows." },
-  { name: "Seated Cable Row", targetSets: 3, targetRepsRange: "10-12", notes: "Squeeze scapula. Fix that posture!" },
-  { name: "Face Pulls", targetSets: 3, targetRepsRange: "15-20", notes: "Critical for Text Neck. Pull to forehead." }
-];
-
-const DEFAULT_WORKOUT_B = [
-  { name: "Romanian Deadlift", targetSets: 3, targetRepsRange: "8-10", notes: "Feel the hamstring stretch. Back straight." },
-  { name: "Lat Pulldown", targetSets: 3, targetRepsRange: "10-12", notes: "Drive elbows down. Chest up." },
-  { name: "Overhead Press", targetSets: 3, targetRepsRange: "8-10", notes: "Tight core. Don't arch lower back." },
-  { name: "Doorway Stretch", targetSets: 2, targetRepsRange: "30 sec", notes: "Open up that tight chest from coding." }
+  { title: "Bedtime (Recovery)", time: "22:30", suggestedItems: BEDTIME }
 ];
 
 // --- SCHEMAS ---
-
 const UserSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
@@ -90,7 +100,7 @@ const UserSchema = new mongoose.Schema({
     targetProtein: { type: Number, default: 125 }
   },
   templates: {
-    diet: { type: Array, default: [] }, 
+    diet: { type: Array, default: DEFAULT_DIET_TEMPLATE },
     workoutA: { type: Array, default: [] },
     workoutB: { type: Array, default: [] }
   }
@@ -98,8 +108,8 @@ const UserSchema = new mongoose.Schema({
 
 const LogSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  date: { type: String, required: true }, // YYYY-MM-DD
-  data: { type: Object, required: true } // The Full DailyLog object
+  date: { type: String, required: true },
+  data: { type: Object, required: true }
 });
 
 LogSchema.index({ userId: 1, date: 1 }, { unique: true });
@@ -107,143 +117,123 @@ LogSchema.index({ userId: 1, date: 1 }, { unique: true });
 const User = mongoose.model('User', UserSchema);
 const Log = mongoose.model('Log', LogSchema);
 
-// --- MIDDLEWARE ---
-
+// --- AUTH MIDDLEWARE ---
 const auth = (req, res, next) => {
   const token = req.header('x-auth-token');
-  if (!token) return res.status(401).json({ msg: 'No token, authorization denied' });
+  if (!token) return res.status(401).json({ msg: 'No token' });
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    req.user = jwt.verify(token, JWT_SECRET);
     next();
-  } catch (e) {
-    res.status(400).json({ msg: 'Token is not valid' });
+  } catch (err) {
+    console.error('Token invalid:', err && err.message);
+    res.status(401).json({ msg: 'Token invalid' });
   }
 };
 
 // --- ROUTES ---
-
-// Register
 app.post('/api/auth/register', async (req, res) => {
-  console.log('Register request:', req.body.username);
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ msg: 'Please enter all fields' });
+  if (!username || !password) return res.status(400).json({ msg: 'Missing fields' });
 
-  try {
-    let user = await User.findOne({ username });
-    if (user) return res.status(400).json({ msg: 'User already exists' });
+  const exists = await User.findOne({ username });
+  if (exists) return res.status(400).json({ msg: 'User exists' });
 
-    // Initialize New User with Defaults
-    user = new User({ 
-        username, 
-        password,
-        templates: {
-            diet: DEFAULT_DIET_TEMPLATE,
-            workoutA: DEFAULT_WORKOUT_A,
-            workoutB: DEFAULT_WORKOUT_B
-        }
-    });
-    
-    const salt = await bcrypt.genSalt(10);
-    user.password = await bcrypt.hash(password, salt);
-    
-    await user.save();
+  const hash = await bcrypt.hash(password, 10);
 
-    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: 3600 * 24 * 30 });
-    res.json({ token, user: { id: user.id, username: user.username, metrics: user.metrics } });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
+  const user = await User.create({
+    username,
+    password: hash
+  });
+
+  const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '30d' });
+  res.json({ token });
 });
 
-// Login
 app.post('/api/auth/login', async (req, res) => {
-  console.log('Login request:', req.body.username);
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ msg: 'Please enter all fields' });
 
-  try {
-    const user = await User.findOne({ username });
-    if (!user) return res.status(400).json({ msg: 'User does not exist' });
+  const user = await User.findOne({ username });
+  if (!user) return res.status(400).json({ msg: 'Invalid credentials' });
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ msg: 'Invalid credentials' });
+  const match = await bcrypt.compare(password, user.password);
+  if (!match) return res.status(400).json({ msg: 'Invalid credentials' });
 
-    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: 3600 * 24 * 30 });
-    res.json({ token, user: { id: user.id, username: user.username, metrics: user.metrics } });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
+  const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '30d' });
+  res.json({ token });
 });
 
-// Get User Profile & Templates
 app.get('/api/user', auth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select('-password');
+    if (!user) return res.status(404).json({ msg: 'User not found' });
     res.json(user);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Get user error:', err);
+    res.status(500).json({ msg: 'Server error' });
   }
 });
 
-// Update User Profile (Metrics or Templates)
-app.put('/api/user', auth, async (req, res) => {
-  try {
-    const updates = req.body; 
-    const user = await User.findByIdAndUpdate(req.user.id, { $set: updates }, { new: true }).select('-password');
-    res.json(user);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Get Log by Date
 app.get('/api/logs/:date', auth, async (req, res) => {
   try {
-    const log = await Log.findOne({ userId: req.user.id, date: req.params.date });
+    const log = await Log.findOne({
+      userId: req.user.id,
+      date: req.params.date
+    });
+
     if (!log) return res.status(404).json({ msg: 'Log not found' });
+
     res.json(log.data);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Get log error:', err);
+    res.status(500).json({ msg: 'Server error' });
   }
 });
 
-// Save Log
+
 app.post('/api/logs', auth, async (req, res) => {
   try {
     const { date, data } = req.body;
-    
+    if (!date || !data) {
+      return res.status(400).json({ msg: 'Date and data required' });
+    }
+
+    // Normalize
+    data.id = date;
+    data.date = date;
+
     const log = await Log.findOneAndUpdate(
       { userId: req.user.id, date },
-      { data },
+      { userId: req.user.id, date, data },
       { new: true, upsert: true }
     );
+
     res.json(log.data);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Save log error:', err);
+    res.status(500).json({ msg: 'Server error' });
   }
 });
 
-// Get All History (Summary)
 app.get('/api/history', auth, async (req, res) => {
   try {
     const logs = await Log.find({ userId: req.user.id }).sort({ date: -1 });
+
     const history = logs.map(l => ({
-        date: l.date,
-        dayOfWeek: l.data.dayOfWeek,
-        calories: l.data.nutrition.totalCaloriesConsumed,
-        targetCalories: l.data.nutrition.targetCalories,
-        protein: l.data.nutrition.totalProteinConsumed,
-        workoutType: l.data.workout.type
+      date: l.date,
+      calories: l.data?.nutrition?.totalCaloriesConsumed ?? 0,
+      targetCalories: l.data?.nutrition?.targetCalories ?? 0,
+      protein: l.data?.nutrition?.totalProteinConsumed ?? 0,
+      workoutType: l.data?.workout?.type ?? null
     }));
+
     res.json(history);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('History error:', err);
+    res.status(500).json({ msg: 'Server error' });
   }
 });
 
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
