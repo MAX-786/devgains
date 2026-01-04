@@ -26,6 +26,7 @@ app.use(cors(corsOptions));
 // Use a valid path pattern for express/path-to-regexp
 // Handle OPTIONS preflight globally via middleware to avoid path-to-regexp issues
 app.use((req, res, next) => {
+  console.log(`API Request - Method: ${req.method}, Path: ${req.path}, Origin: ${req.headers.origin}`);
   if (req.method === 'OPTIONS') {
     res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
     res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
